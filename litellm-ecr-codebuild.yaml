@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Build and push LiteLLM Docker image to ECR using CodeBuild (manual builds only)
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Default: litellm
+    Description: ECR repository name
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Image tag to push
+  GitHubRepoUrl:
+    Type: String
+    Default: https://github.com/BerriAI/litellm.git
+    Description: LiteLLM GitHub repository URL
+  CodeBuildComputeType:
+    Type: String
+    Default: BUILD_GENERAL1_MEDIUM
+    AllowedValues:
+      - BUILD_GENERAL1_SMALL
+      - BUILD_GENERAL1_MEDIUM
+      - BUILD_GENERAL1_LARGE
+    Description: CodeBuild instance size
+
+Resources:
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Policies:
+        - PolicyName: CodeBuildEcrAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                  - ecr:DescribeRepositories
+                  - ecr:BatchGetImage
+                Resource: !GetAtt EcrRepository.Arn
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-litellm-build
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: !Ref CodeBuildComputeType
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: REPOSITORY_NAME
+            Value: !Ref RepositoryName
+          - Name: IMAGE_TAG
+            Value: !Ref ImageTag
+      Source:
+        Type: GITHUB
+        Location: !Ref GitHubRepoUrl
+        GitCloneDepth: 1
+        BuildSpec: |
+          version: 0.2
+          env:
+            shell: bash
+          phases:
+            pre_build:
+              commands:
+                - echo Logging in to Amazon ECR...
+                - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                - REGION=$AWS_DEFAULT_REGION
+                - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPOSITORY_NAME
+                - aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
+            build:
+              commands:
+                - echo Building LiteLLM Docker image...
+                - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                - REGION=$AWS_DEFAULT_REGION
+                - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPOSITORY_NAME
+                - SHORT_SHA=${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}
+                - docker build -t "$REPOSITORY_NAME:$IMAGE_TAG" -t "$REPOSITORY_URI:$IMAGE_TAG" -t "$REPOSITORY_URI:sha-$SHORT_SHA" .
+            post_build:
+              commands:
+                - echo Pushing image to ECR...
+                - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                - REGION=$AWS_DEFAULT_REGION
+                - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPOSITORY_NAME
+                - docker push "$REPOSITORY_URI:$IMAGE_TAG"
+                - docker push "$REPOSITORY_URI:sha-$SHORT_SHA"
+                - echo Build completed on `date`
+      TimeoutInMinutes: 60
+      QueuedTimeoutInMinutes: 60
+
+Outputs:
+  EcrRepositoryUri:
+    Description: ECR repository URI
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RepositoryName}
+  EcrRepositoryName:
+    Description: ECR repository name
+    Value: !Ref EcrRepository
+  CodeBuildProjectName:
+    Description: CodeBuild project name to trigger manual builds
+    Value: !Ref CodeBuildProject
+  CodeBuildProjectArn:
+    Description: CodeBuild project ARN
+    Value: !GetAtt CodeBuildProject.Arn
+  StartBuildCommand:
+    Description: CLI command to start a manual build
+    Value: !Sub aws codebuild start-build --project-name ${CodeBuildProject}
