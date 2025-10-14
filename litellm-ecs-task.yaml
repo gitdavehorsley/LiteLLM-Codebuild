@@ -117,6 +117,12 @@ Resources:
                 Action:
                   - bedrock:InvokeModel
                   - bedrock:InvokeModelWithResponseStream
+                Resource: 
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/*'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:custom-model/*'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:provisioned-model/*'
+              - Effect: Allow
+                Action:
                   - bedrock:ListFoundationModels
                   - bedrock:GetFoundationModel
                   - bedrock:ListModelCustomizationJobs
@@ -131,7 +137,10 @@ Resources:
                   - bedrock:ListProvisionedModelThroughputs
                   - bedrock:UpdateProvisionedModelThroughput
                   - bedrock:DeleteProvisionedModelThroughput
-                Resource: '*'
+                Resource: 
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:model-customization-job/*'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:custom-model/*'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:provisioned-model/*'
               - Effect: Allow
                 Action:
                   - logs:CreateLogStream
