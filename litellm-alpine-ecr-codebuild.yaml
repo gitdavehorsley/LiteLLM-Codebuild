@@ -1,0 +1,209 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Build and push LiteLLM Docker image (Alpine-based with SSM Agent) to ECR using CodeBuild
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Default: litellm-alpine
+    Description: ECR repository name
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Image tag to push
+  CodeBuildComputeType:
+    Type: String
+    Default: BUILD_GENERAL1_MEDIUM
+    AllowedValues:
+      - BUILD_GENERAL1_SMALL
+      - BUILD_GENERAL1_MEDIUM
+      - BUILD_GENERAL1_LARGE
+    Description: CodeBuild instance size
+
+Resources:
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Policies:
+        - PolicyName: CodeBuildEcrAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                  - ecr:DescribeRepositories
+                  - ecr:BatchGetImage
+                Resource: !GetAtt EcrRepository.Arn
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParameterHistory
+                Resource: '*'
+                Condition:
+                  StringLike:
+                    'ssm:Name': 
+                      - '/aws/service/*'
+                      - '/litellm/*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeRegions
+                Resource: '*'
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-litellm-alpine-build
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: !Ref CodeBuildComputeType
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: REPOSITORY_NAME
+            Value: !Ref RepositoryName
+          - Name: IMAGE_TAG
+            Value: !Ref ImageTag
+      Source:
+        Type: GITHUB
+        Location: https://github.com/BerriAI/litellm.git
+        GitCloneDepth: 1
+        BuildSpec: |
+          version: 0.2
+          env:
+            shell: bash
+          phases:
+            pre_build:
+              commands:
+                - echo Logging in to Amazon ECR...
+                - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                - REGION=$AWS_DEFAULT_REGION
+                - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPOSITORY_NAME
+                - aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
+            build:
+              commands:
+                - echo Building LiteLLM Alpine Docker image with SSM Agent from GitHub source...
+                - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                - REGION=$AWS_DEFAULT_REGION
+                - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPOSITORY_NAME
+                - SHORT_SHA=${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}
+                - |
+                  cat > Dockerfile <<'EOF'
+                  # Start with plain Alpine Linux
+                  FROM alpine:latest
+
+                  # Install system dependencies and Python
+                  RUN apk update && \
+                      apk add --no-cache \
+                      python3 \
+                      py3-pip \
+                      python3-dev \
+                      gcc \
+                      musl-dev \
+                      libffi-dev \
+                      openssl-dev \
+                      curl \
+                      wget \
+                      git \
+                      bash \
+                      && rm -rf /var/cache/apk/*
+
+                  # Create a non-root user
+                  RUN adduser -D -u 1000 litellm
+
+                  # Set working directory
+                  WORKDIR /app
+
+                  # Copy litellm source from GitHub (will be copied during build)
+                  COPY . /app
+
+                  # Install litellm from source
+                  RUN pip3 install --no-cache-dir -e .
+
+                  # Install AWS SSM agent
+                  RUN wget -O amazon-ssm-agent.tar.gz https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.tar.gz && \
+                      tar -xzf amazon-ssm-agent.tar.gz && \
+                      ./amazon-ssm-agent/install && \
+                      rm -rf amazon-ssm-agent.tar.gz amazon-ssm-agent
+
+                  # Create SSM agent service script
+                  RUN echo '#!/bin/sh' > /etc/init.d/amazon-ssm-agent && \
+                      echo 'case "$1" in' >> /etc/init.d/amazon-ssm-agent && \
+                      echo '  start)' >> /etc/init.d/amazon-ssm-agent && \
+                      echo '    /usr/local/bin/amazon-ssm-agent start' >> /etc/init.d/amazon-ssm-agent && \
+                      echo '    ;;' >> /etc/init.d/amazon-ssm-agent && \
+                      echo '  stop)' >> /etc/init.d/amazon-ssm-agent && \
+                      echo '    /usr/local/bin/amazon-ssm-agent stop' >> /etc/init.d/amazon-ssm-agent && \
+                      echo '    ;;' >> /etc/init.d/amazon-ssm-agent && \
+                      echo 'esac' >> /etc/init.d/amazon-ssm-agent && \
+                      chmod +x /etc/init.d/amazon-ssm-agent
+
+                  # Switch to non-root user
+                  USER litellm
+
+                  # Expose the default litellm port
+                  EXPOSE 4000
+
+                  # Health check
+                  HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+                      CMD curl -f http://localhost:4000/health || exit 1
+
+                  # Default command to run litellm
+                  CMD ["litellm", "--host", "0.0.0.0", "--port", "4000"]
+                  EOF
+                - docker build -t "$REPOSITORY_NAME:$IMAGE_TAG" -t "$REPOSITORY_URI:$IMAGE_TAG" -t "$REPOSITORY_URI:sha-$SHORT_SHA" .
+            post_build:
+              commands:
+                - echo Pushing image to ECR...
+                - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                - REGION=$AWS_DEFAULT_REGION
+                - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPOSITORY_NAME
+                - docker push "$REPOSITORY_URI:$IMAGE_TAG"
+                - docker push "$REPOSITORY_URI:sha-$SHORT_SHA"
+                - echo Build completed on `date`
+      TimeoutInMinutes: 60
+      QueuedTimeoutInMinutes: 60
+
+Outputs:
+  EcrRepositoryUri:
+    Description: ECR repository URI
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RepositoryName}
+  EcrRepositoryName:
+    Description: ECR repository name
+    Value: !Ref EcrRepository
+  CodeBuildProjectName:
+    Description: CodeBuild project name to trigger manual builds
+    Value: !Ref CodeBuildProject
+  CodeBuildProjectArn:
+    Description: CodeBuild project ARN
+    Value: !GetAtt CodeBuildProject.Arn
+  StartBuildCommand:
+    Description: CLI command to start a manual build
+    Value: !Sub aws codebuild start-build --project-name ${CodeBuildProject}
