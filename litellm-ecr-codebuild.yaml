@@ -126,32 +126,19 @@ Resources:
                   # Switch to Amazon Linux 2023 for better AWS tooling support
                   FROM public.ecr.aws/amazonlinux/amazonlinux:2023
                   
-                  # Install base tools and dependencies first
+                  # Install base tools and AWS utilities
                   RUN dnf -y update && \
                       dnf -y install \
                           python3.11 \
                           python3.11-pip \
-                          curl \
-                          wget \
                           unzip \
                           tar \
                           gzip \
-                          && \
-                      dnf clean all
-                  
-                  # Install AWS tools separately to handle potential conflicts
-                  RUN dnf -y install --skip-broken \
                           amazon-ssm-agent \
                           amazon-efs-utils \
                           amazon-cloudwatch-agent \
-                          || true && \
+                          && \
                       dnf clean all && rm -rf /var/cache/dnf
-                  
-                  # Install AWS CLI v2
-                  RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
-                      unzip awscliv2.zip && \
-                      ./aws/install && \
-                      rm -rf awscliv2.zip aws/
                   
                   # Copy LiteLLM application from base image
                   COPY --from=litellm-base /app /app
