@@ -126,30 +126,24 @@ Resources:
                   # Switch to root to install packages
                   USER root
                   
-                  # Install AWS utilities on top of the existing image
-                  RUN apt-get update && \
-                      apt-get install -y \
+                  # Install AWS utilities on top of the existing image (Alpine Linux)
+                  RUN apk update && \
+                      apk add --no-cache \
                           curl \
                           unzip \
                           tar \
                           gzip \
                           wget \
+                          bash \
                           && \
                       # Install AWS CLI v2
                       curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
                       unzip awscliv2.zip && \
                       ./aws/install && \
-                      rm -rf awscliv2.zip aws && \
-                      # Install SSM Agent (if needed for ECS tasks)
-                      wget https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb && \
-                      dpkg -i amazon-ssm-agent.deb || apt-get install -f -y && \
-                      rm amazon-ssm-agent.deb && \
-                      # Clean up
-                      apt-get clean && \
-                      rm -rf /var/lib/apt/lists/*
+                      rm -rf awscliv2.zip aws
                   
                   # Create non-root user for security (if it doesn't exist)
-                  RUN id -u litellm >/dev/null 2>&1 || useradd -m -u 1000 litellm
+                  RUN id -u litellm >/dev/null 2>&1 || adduser -D -u 1000 litellm
                   
                   # Switch back to non-root user
                   USER litellm
