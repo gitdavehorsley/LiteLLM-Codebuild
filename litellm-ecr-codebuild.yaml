@@ -126,21 +126,11 @@ Resources:
                   # Switch to root to install packages
                   USER root
                   
-                  # Install AWS utilities on top of the existing image (Alpine Linux)
+                  # Install basic utilities on top of the existing image (Alpine Linux)
                   RUN apk update && \
                       apk add --no-cache \
                           curl \
-                          unzip \
-                          tar \
-                          gzip \
-                          wget \
-                          bash \
-                          && \
-                      # Install AWS CLI v2
-                      curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
-                      unzip awscliv2.zip && \
-                      ./aws/install && \
-                      rm -rf awscliv2.zip aws
+                          bash
                   
                   # Create non-root user for security (if it doesn't exist)
                   RUN id -u litellm >/dev/null 2>&1 || adduser -D -u 1000 litellm
