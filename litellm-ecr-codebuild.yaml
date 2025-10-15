@@ -126,7 +126,7 @@ Resources:
                   # Switch to Amazon Linux 2023 for better AWS tooling support
                   FROM public.ecr.aws/amazonlinux/amazonlinux:2023
                   
-                  # Install AWS tools and dependencies
+                  # Install base tools and dependencies first
                   RUN dnf -y update && \
                       dnf -y install \
                           python3.11 \
@@ -136,10 +136,15 @@ Resources:
                           unzip \
                           tar \
                           gzip \
+                          && \
+                      dnf clean all
+                  
+                  # Install AWS tools separately to handle potential conflicts
+                  RUN dnf -y install --skip-broken \
                           amazon-ssm-agent \
                           amazon-efs-utils \
                           amazon-cloudwatch-agent \
-                          && \
+                          || true && \
                       dnf clean all && rm -rf /var/cache/dnf
                   
                   # Install AWS CLI v2
