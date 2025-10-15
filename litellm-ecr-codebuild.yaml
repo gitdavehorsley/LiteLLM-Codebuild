@@ -126,11 +126,30 @@ Resources:
                   # Switch to root to install packages
                   USER root
                   
-                  # Install basic utilities on top of the existing image (Alpine Linux)
+                  # Install AWS SSM agent and minimal required packages
                   RUN apk update && \
                       apk add --no-cache \
                           curl \
-                          bash
+                          bash \
+                          ca-certificates \
+                          && \
+                      # Download and install AWS SSM agent for Alpine Linux
+                      curl -o amazon-ssm-agent.tar.gz https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.tar.gz \
+                      && tar -xzf amazon-ssm-agent.tar.gz \
+                      && ./amazon-ssm-agent/install \
+                      && rm -rf amazon-ssm-agent.tar.gz amazon-ssm-agent \
+                      && \
+                      # Create SSM agent service script
+                      echo '#!/bin/sh' > /etc/init.d/amazon-ssm-agent \
+                      && echo 'case "$1" in' >> /etc/init.d/amazon-ssm-agent \
+                      && echo '  start)' >> /etc/init.d/amazon-ssm-agent \
+                      && echo '    /usr/local/bin/amazon-ssm-agent start' >> /etc/init.d/amazon-ssm-agent \
+                      && echo '    ;;' >> /etc/init.d/amazon-ssm-agent \
+                      && echo '  stop)' >> /etc/init.d/amazon-ssm-agent \
+                      && echo '    /usr/local/bin/amazon-ssm-agent stop' >> /etc/init.d/amazon-ssm-agent \
+                      && echo '    ;;' >> /etc/init.d/amazon-ssm-agent \
+                      && echo 'esac' >> /etc/init.d/amazon-ssm-agent \
+                      && chmod +x /etc/init.d/amazon-ssm-agent
                   
                   # Create non-root user for security (if it doesn't exist)
                   RUN id -u litellm >/dev/null 2>&1 || adduser -D -u 1000 litellm
