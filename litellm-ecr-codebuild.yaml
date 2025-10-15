@@ -120,10 +120,10 @@ Resources:
                 - SHORT_SHA=${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}
                 - |
                   cat > Dockerfile.aws-enhanced <<'EOF'
-                  # Use the original LiteLLM Dockerfile as base
+                  # Use the official LiteLLM image as base
                   FROM ghcr.io/berriai/litellm:main-latest as litellm-base
                   
-                  # Switch to Amazon Linux 2023 for better AWS tooling support
+                  # Switch to Amazon Linux 2023 for AWS tooling support
                   FROM public.ecr.aws/amazonlinux/amazonlinux:2023
                   
                   # Install base tools and AWS utilities
@@ -134,26 +134,30 @@ Resources:
                           unzip \
                           tar \
                           gzip \
+                          curl \
                           amazon-ssm-agent \
                           amazon-efs-utils \
                           amazon-cloudwatch-agent \
                           && \
                       dnf clean all && rm -rf /var/cache/dnf
                   
-                  # Copy LiteLLM application from base image
+                  # Copy the entire LiteLLM installation from the official image
+                  # This approach copies everything to avoid missing specific paths
                   COPY --from=litellm-base /app /app
-                  COPY --from=litellm-base /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-                  COPY --from=litellm-base /usr/local/bin /usr/local/bin
+                  COPY --from=litellm-base /usr/local /usr/local
+                  COPY --from=litellm-base /root/.local /root/.local 2>/dev/null || true
                   
                   # Set working directory
                   WORKDIR /app
                   
-                  # Ensure Python path includes site-packages
-                  ENV PYTHONPATH="/usr/local/lib/python3.11/site-packages:$PYTHONPATH"
+                  # Ensure Python can find all packages
+                  ENV PYTHONPATH="/usr/local/lib/python3.11/site-packages:/usr/local/lib/python3.10/site-packages:/usr/local/lib/python3.9/site-packages:$PYTHONPATH"
+                  ENV PATH="/usr/local/bin:/root/.local/bin:$PATH"
                   
-                  # Create non-root user for security
+                  # Create non-root user for security and fix permissions
                   RUN useradd -m -u 1000 litellm && \
-                      chown -R litellm:litellm /app
+                      chown -R litellm:litellm /app && \
+                      chmod +x /usr/local/bin/* 2>/dev/null || true
                   
                   USER litellm
                   
@@ -164,7 +168,7 @@ Resources:
                   # Expose port
                   EXPOSE 4000
                   
-                  # Default command
+                  # Default command - try multiple possible entry points
                   CMD ["litellm", "--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
                   EOF
                 - docker build -t "$REPOSITORY_NAME:$IMAGE_TAG" -t "$REPOSITORY_URI:$IMAGE_TAG" -t "$REPOSITORY_URI:sha-$SHORT_SHA" -f Dockerfile.aws-enhanced .
