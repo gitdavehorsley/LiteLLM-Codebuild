@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Build and push LiteLLM Docker image to ECR using CodeBuild (manual builds only)
+Description: Build and push mcpo Docker image (with SSM Agent and EFS utils) to ECR using CodeBuild
 
 Parameters:
   RepositoryName:
     Type: String
-    Default: litellm
+    Default: mcpo
     Description: ECR repository name
   ImageTag:
     Type: String
@@ -12,16 +12,20 @@ Parameters:
     Description: Image tag to push
   GitHubRepoUrl:
     Type: String
-    Default: https://github.com/BerriAI/litellm.git
-    Description: LiteLLM GitHub repository URL
+    Default: https://github.com/open-webui/mcpo.git
+    Description: Public GitHub repo URL to build
   CodeBuildComputeType:
     Type: String
-    Default: BUILD_GENERAL1_MEDIUM
+    Default: BUILD_GENERAL1_SMALL
     AllowedValues:
       - BUILD_GENERAL1_SMALL
       - BUILD_GENERAL1_MEDIUM
       - BUILD_GENERAL1_LARGE
     Description: CodeBuild instance size
+  CodeBuildImage:
+    Type: String
+    Default: aws/codebuild/standard:7.0
+    Description: CodeBuild managed image with Docker CLI
 
 Resources:
   EcrRepository:
@@ -43,15 +47,17 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
       Policies:
-        - PolicyName: CodeBuildEcrAccess
+        - PolicyName: CodeBuildEcrDockerAccess
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Effect: Allow
+              - Sid: EcrAuth
+                Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
                 Resource: '*'
-              - Effect: Allow
+              - Sid: EcrCrudOnRepo
+                Effect: Allow
                 Action:
                   - ecr:BatchCheckLayerAvailability
                   - ecr:CompleteLayerUpload
@@ -62,18 +68,15 @@ Resources:
                   - ecr:DescribeRepositories
                   - ecr:BatchGetImage
                 Resource: !GetAtt EcrRepository.Arn
-              - Effect: Allow
+              - Sid: SSMParamReadOptional
+                Effect: Allow
                 Action:
                   - ssm:GetParameter
                   - ssm:GetParameters
                   - ssm:GetParameterHistory
                 Resource: '*'
-                Condition:
-                  StringLike:
-                    'ssm:Name': 
-                      - '/aws/service/*'
-                      - '/litellm/*'
-              - Effect: Allow
+              - Sid: Ec2DescribeRegion
+                Effect: Allow
                 Action:
                   - ec2:DescribeRegions
                 Resource: '*'
@@ -81,14 +84,14 @@ Resources:
   CodeBuildProject:
     Type: AWS::CodeBuild::Project
     Properties:
-      Name: !Sub ${AWS::StackName}-litellm-build
+      Name: !Sub ${AWS::StackName}-mcpo-build
       ServiceRole: !GetAtt CodeBuildServiceRole.Arn
       Artifacts:
         Type: NO_ARTIFACTS
       Environment:
         Type: LINUX_CONTAINER
         ComputeType: !Ref CodeBuildComputeType
-        Image: aws/codebuild/standard:7.0
+        Image: !Ref CodeBuildImage
         PrivilegedMode: true
         EnvironmentVariables:
           - Name: REPOSITORY_NAME
@@ -106,6 +109,7 @@ Resources:
           phases:
             pre_build:
               commands:
+                - set -euo pipefail
                 - echo Logging in to Amazon ECR...
                 - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
                 - REGION=$AWS_DEFAULT_REGION
@@ -113,80 +117,44 @@ Resources:
                 - aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
             build:
               commands:
-                - echo Building LiteLLM Docker image with AWS tools...
-                - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-                - REGION=$AWS_DEFAULT_REGION
-                - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPOSITORY_NAME
-                - SHORT_SHA=${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}
+                - echo Building Docker image with SSM Agent and EFS utils...
+                - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text); REGION=$AWS_DEFAULT_REGION; REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPOSITORY_NAME
                 - |
-                  cat > Dockerfile.aws-enhanced <<'EOF'
-                  # Use the original LiteLLM Dockerfile as base
-                  FROM ghcr.io/berriai/litellm:main-latest as litellm-base
-                  
-                  # Switch to Amazon Linux 2023 for better AWS tooling support
+                  cat > Dockerfile.cicd <<'EOF'
                   FROM public.ecr.aws/amazonlinux/amazonlinux:2023
-                  
-                  # Install AWS tools and dependencies
+
+                  # Base tools, SSM Agent, and EFS utils
                   RUN dnf -y update && \
-                      dnf -y install \
-                          python3.11 \
-                          python3.11-pip \
-                          curl \
-                          wget \
-                          unzip \
-                          tar \
-                          gzip \
-                          amazon-ssm-agent \
-                          amazon-efs-utils \
-                          amazon-cloudwatch-agent \
-                          && \
+                      dnf -y install python3.11 python3.11-pip git tar gzip amazon-ssm-agent amazon-efs-utils && \
                       dnf clean all && rm -rf /var/cache/dnf
-                  
-                  # Install AWS CLI v2
-                  RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
-                      unzip awscliv2.zip && \
-                      ./aws/install && \
-                      rm -rf awscliv2.zip aws/
-                  
-                  # Copy LiteLLM application from base image
-                  COPY --from=litellm-base /app /app
-                  COPY --from=litellm-base /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-                  COPY --from=litellm-base /usr/local/bin /usr/local/bin
-                  
-                  # Set working directory
+
                   WORKDIR /app
-                  
-                  # Ensure Python path includes site-packages
-                  ENV PYTHONPATH="/usr/local/lib/python3.11/site-packages:$PYTHONPATH"
-                  
-                  # Create non-root user for security
-                  RUN useradd -m -u 1000 litellm && \
-                      chown -R litellm:litellm /app
-                  
-                  USER litellm
-                  
-                  # Health check
-                  HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-                      CMD curl -f http://localhost:4000/health || exit 1
-                  
-                  # Expose port
-                  EXPOSE 4000
-                  
-                  # Default command
-                  CMD ["litellm", "--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+                  # Copy mcpo source into the image
+                  COPY . /app
+
+                  # Build and install mcpo from the repo's pyproject
+                  RUN python3.11 -m pip install --upgrade pip && \
+                      pip3.11 install --no-cache-dir .
+
+                  EXPOSE 8000
+                  # mcpo is the entrypoint; pass arguments at runtime (e.g., server flags)
+                  ENTRYPOINT ["mcpo"]
+                  CMD ["--help"]
                   EOF
-                - docker build -t "$REPOSITORY_NAME:$IMAGE_TAG" -t "$REPOSITORY_URI:$IMAGE_TAG" -t "$REPOSITORY_URI:sha-$SHORT_SHA" -f Dockerfile.aws-enhanced .
+                - SHORT_SHA=${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}
+                - docker build -t "$REPOSITORY_NAME:$IMAGE_TAG" -t "$REPOSITORY_URI:$IMAGE_TAG" -t "$REPOSITORY_URI:sha-$SHORT_SHA" -f Dockerfile.cicd .
             post_build:
               commands:
                 - echo Pushing image to ECR...
-                - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-                - REGION=$AWS_DEFAULT_REGION
-                - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPOSITORY_NAME
+                - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text); REGION=$AWS_DEFAULT_REGION; REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPOSITORY_NAME
                 - docker push "$REPOSITORY_URI:$IMAGE_TAG"
                 - docker push "$REPOSITORY_URI:sha-$SHORT_SHA"
                 - echo Build completed on `date`
+          cache:
+            paths: []
       TimeoutInMinutes: 60
       QueuedTimeoutInMinutes: 60
+      BadgeEnabled: true
 
 Outputs:
   EcrRepositoryUri:
@@ -196,12 +164,11 @@ Outputs:
     Description: ECR repository name
     Value: !Ref EcrRepository
   CodeBuildProjectName:
-    Description: CodeBuild project name to trigger manual builds
+    Description: CodeBuild project name to trigger builds
     Value: !Ref CodeBuildProject
   CodeBuildProjectArn:
     Description: CodeBuild project ARN
     Value: !GetAtt CodeBuildProject.Arn
-  StartBuildCommand:
-    Description: CLI command to start a manual build
+  ExampleStartBuildCli:
+    Description: Example CLI to start a build
     Value: !Sub aws codebuild start-build --project-name ${CodeBuildProject}
-
