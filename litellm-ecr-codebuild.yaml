@@ -126,15 +126,10 @@ Resources:
                   # Switch to root to install packages
                   USER root
                   
-                  # Install AWS SSM agent and minimal required packages
+                  # Install AWS SSM agent only
                   RUN apk update && \
-                      apk add --no-cache \
-                          curl \
-                          bash \
-                          ca-certificates \
-                          && \
                       # Download and install AWS SSM agent for Alpine Linux
-                      curl -o amazon-ssm-agent.tar.gz https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.tar.gz \
+                      wget -O amazon-ssm-agent.tar.gz https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.tar.gz \
                       && tar -xzf amazon-ssm-agent.tar.gz \
                       && ./amazon-ssm-agent/install \
                       && rm -rf amazon-ssm-agent.tar.gz amazon-ssm-agent \
