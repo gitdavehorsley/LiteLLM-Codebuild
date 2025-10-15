@@ -1,5 +1,5 @@
-# Start with plain Alpine Linux
-FROM alpine:latest
+# Start with AWS ECR Public Alpine Linux image
+FROM public.ecr.aws/docker/library/alpine:latest
 
 # Install system dependencies and Python
 RUN apk update && \

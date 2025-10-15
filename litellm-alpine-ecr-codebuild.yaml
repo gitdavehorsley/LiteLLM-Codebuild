@@ -116,8 +116,8 @@ Resources:
                 - SHORT_SHA=${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}
                 - |
                   cat > Dockerfile <<'EOF'
-                  # Start with plain Alpine Linux
-                  FROM alpine:latest
+                  # Start with AWS ECR Public Alpine Linux image
+                  FROM public.ecr.aws/docker/library/alpine:latest
 
                   # Install system dependencies and Python
                   RUN apk update && \
